@@ -23,6 +23,8 @@
 
 #include "Arduino.h"
 
+#define ESP32_DAB_PLUS			1
+
 const PROGMEM uint32_t dab_freq[] = {174928, 176640, 178352, 180064, 181936, 183648, 185360, 187072, 188928, 190640, 192352, 194064, 195936, 197648, 199360, 201072,
                                      202928, 204640, 206352, 208064, 209936, 211648, 213360, 215072, 216928, 218640, 220352, 222064, 223936, 225648, 227360, 229072,
                                      230784, 232496, 234208, 235776, 237488, 239200
@@ -101,7 +103,11 @@ class DAB {
 	uint32_t EnsembleID;
     char Ensemble[17];
     char ServiceData[DAB_MAX_SERVICEDATA_LEN];
-	
+#if defined(ESP32_DAB_PLUS)
+	bool rdstextvalid(void);
+	bool slideshowvalid(void);
+	uint8_t* slideshow(uint32_t *size);
+#endif
 	uint8_t error;
 
 	uint8_t		freq_index;

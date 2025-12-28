@@ -24,6 +24,12 @@
 #include "DABShield.h"
 #include "Si468xROM.h"
 
+#if defined(ESP32_DAB_PLUS)
+// #include "fw_dab_radio_4_0_5.h"
+// #include "fw_dab_radio_5_0_5.h"
+#include "fw_dab_radio_6_0_6.h"
+#endif
+
 #define LIBMAJOR	1
 #define LIBMINOR	5
 
@@ -78,11 +84,25 @@ byte PwrEn = 6;
 #if defined (ARDUINO_AVR_UNO)
 #define SPI_BUFF_SIZE	(256)
 #else
+#if defined(ESP32_DAB_PLUS)
+#define SPI_BUFF_SIZE	(4096)
+#else
 #define SPI_BUFF_SIZE	(512)
+#endif
 #endif
 
 unsigned char spiBuf[SPI_BUFF_SIZE + 8];
 uint8_t command_error;
+
+#if defined(ESP32_DAB_PLUS)
+uint8_t *pSlideShowTemp = NULL;
+uint32_t slideShowSizeTemp = 0;
+uint8_t *pSlideShow = NULL;
+uint32_t slideShowSize = 0;
+uint32_t slideShowByteCounter = 0;
+bool slideShowValid = false;
+bool rdsTextValid = false;
+#endif
 
 static void si468x_reset(void);
 static void si468x_init_dab(void);
@@ -94,7 +114,11 @@ static void si468x_init_fm(void);
 static void si468x_fm_tune_freq(uint16_t freq);
 static void si468x_fm_seek(uint8_t dir, uint8_t wrap);
 
+#if defined (ESP32_DAB_PLUS)
+static void si468x_firmware_load(void);
+#else
 static void si468x_flash_load(uint32_t flash_addr);
+#endif
 static void si468x_boot(void);
 static void si468x_power_up(void);
 static void si468x_power_down(void);
@@ -190,6 +214,9 @@ void DAB::begin(uint8_t band, byte _interruptPin, byte _DABResetPin, byte _PwrEn
 void DAB::begin(uint8_t band)
 {
 	pinMode(DABResetPin, OUTPUT);
+#if defined(ESP32_DAB_PLUS)
+	if (PwrEn != -1)
+#endif
 	pinMode(PwrEn,OUTPUT);
 	pinMode(interruptPin, INPUT_PULLUP);
 
@@ -210,6 +237,14 @@ void DAB::begin(uint8_t band)
 		si468x_get_func_info();
 		dab = false;
 	}
+
+#if defined(ESP32_DAB_PLUS)
+	si468x_set_property(0x0200, 0x0000); // I2S slave mode
+	si468x_set_property(0x0201, 44100);  // I2S sample rate
+	si468x_set_property(0x0202, 0x1000); // I2S output format
+	si468x_set_property(0x0800, 0x8003); // Digital Output Enable
+#endif
+
 	error = command_error;
 }
 
@@ -503,6 +538,9 @@ void DAB::get_subchan_info(uint32_t serviceID, uint32_t compID)
 
 static void si468x_reset(void)
 {
+#if defined(ESP32_DAB_PLUS)
+	if (PwrEn != -1)
+#endif
 	digitalWrite(PwrEn, HIGH);
 	delay(100);	
 
@@ -516,13 +554,19 @@ static void si468x_reset(void)
 	si468x_host_load();
 	si468x_load_init();
 
+#if !defined (ESP32_DAB_PLUS)
 	//Set SPI Clock to 10 MHz
 	si468x_flash_set_property(0x0001, 10000);
+#endif
 }
 
 static void si468x_init_dab()
 {
+#if defined (ESP32_DAB_PLUS)
+	si468x_firmware_load();
+#else
 	si468x_flash_load(0x6000);
+#endif
 	si468x_boot();
 	si468x_set_freq_list();
 
@@ -539,7 +583,11 @@ static void si468x_init_dab()
 
 static void si468x_init_fm()
 {
+#if defined (ESP32_DAB_PLUS)
+	si468x_firmware_load();
+#else
 	si468x_flash_load(0x86000);
+#endif
 	si468x_boot();
 
 	//FM Seek Settings:
@@ -781,6 +829,32 @@ static void si468x_host_load(void)
 	}
 }
 
+#if defined (ESP32_DAB_PLUS)
+static void si468x_firmware_load(void)
+{
+	uint32_t index;
+	uint32_t firmwaresize;
+	uint32_t i;
+
+	firmwaresize = sizeof(firmware);
+	index = 0;
+
+	while (index < firmwaresize)
+	{
+		spiBuf[0] = SI46XX_HOST_LOAD;
+		spiBuf[1] = 0x00;
+		spiBuf[2] = 0x00;
+		spiBuf[3] = 0x00;
+		for (i = 4; (i < SPI_BUFF_SIZE) && (index < firmwaresize); i++)
+		{
+			spiBuf[i] = pgm_read_byte_near(firmware + index);
+			index++;
+		}
+		WriteSpiMssg(spiBuf, i);
+		si468x_cts();
+	}
+}
+#else
 static void si468x_flash_load(uint32_t flash_addr)
 {
 	spiBuf[0] = SI46XX_FLASH_LOAD;
@@ -801,6 +875,7 @@ static void si468x_flash_load(uint32_t flash_addr)
 	WriteSpiMssg(spiBuf, 12);
 	si468x_cts();
 }
+#endif
 
 static void si468x_boot(void)
 {
@@ -1359,13 +1434,104 @@ void DAB::parse_service_data(void)
 				ServiceData[j] = (char)spiBuf[27 + j];
 			}
 			ServiceData[j] = '\0';
+#if defined(ESP32_DAB_PLUS)
+			rdsTextValid = true;
+#endif
 		}
 	}
+#if defined(ESP32_DAB_PLUS)
+	else if (data_src == 0x01) // Slideshow
+	{
+		if ((spiBuf[27] == 0x80) && (spiBuf[28] == 0x00) && (spiBuf[29] == 0x12) && (byte_count < 65))
+		{
+			// init transfer
+			if (pSlideShowTemp)
+			{
+				free(pSlideShowTemp);
+				pSlideShowTemp = NULL;
+				slideShowSizeTemp = 0;
+			}
+
+			slideShowSizeTemp = (((uint16_t)spiBuf[35] << 12) | ((uint16_t)spiBuf[36] << 4) | ((uint16_t)spiBuf[37]  >> 4)) & 0x00FFFF;
+			pSlideShowTemp = (uint8_t *) ps_malloc(slideShowSizeTemp);
+			slideShowByteCounter = 0;
+		}
+		else if (((spiBuf[27] == 0x00) || (spiBuf[27] == 0x80)) && (spiBuf[29] == 0x12) && slideShowSizeTemp)
+		{
+			if (pSlideShowTemp)
+			{
+				memcpy(pSlideShowTemp + slideShowByteCounter, &spiBuf[34], byte_count - 11);
+				slideShowByteCounter += byte_count - 11;
+			}
+
+			// transfer finished
+			if (spiBuf[27] == 0x80)
+			{
+				if (slideShowByteCounter == slideShowSizeTemp)
+				{
+					if (pSlideShow)
+					{
+						free(pSlideShow);
+					}
+
+					Serial.print("SlideShow successuly received. File size ");
+					Serial.println(slideShowByteCounter);
+
+					pSlideShow = pSlideShowTemp;
+					slideShowSize = slideShowSizeTemp;
+					slideShowValid = true;
+				}
+				else
+				{
+					if (pSlideShowTemp)
+					{
+						free(pSlideShowTemp);
+					}
+				}
+
+				pSlideShowTemp = NULL;
+				slideShowSizeTemp = 0;
+			}
+		}
+	}
+#endif
 	else
 	{
 		//NON RAD/DLS
+		Serial.print("data_src=0x");
+		Serial.println(data_src, HEX);
 	}
 }
+
+#if defined(ESP32_DAB_PLUS)
+bool DAB::rdstextvalid(void)
+{
+	if (rdsTextValid)
+	{
+		rdsTextValid = false;
+		return true;
+	}
+
+	return false;
+}
+
+bool DAB::slideshowvalid(void)
+{
+	if (slideShowValid)
+	{
+		slideShowValid = false;
+		return true;
+	}
+
+	return false;
+}
+
+uint8_t* DAB::slideshow(uint32_t *size)
+{
+	*size = slideShowSize;
+	return pSlideShow;
+}
+#endif
 
 #define RDS_GROUP_0A	0
 #define RDS_GROUP_0B	1
