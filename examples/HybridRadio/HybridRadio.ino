@@ -10,12 +10,11 @@
  *
  * Required Libraries:
  *  o DAB Shield
- *  o TFT_eSPI
+ *  o TFT_eSPI (v2.5.43)
  *  o FT6236/TAMC_GT911/
- *  o ArduinoJson
- *  o TinyXML2
- *  o SPIFFS
- *  o PNGDec
+ *  o ArduinoJson (v7.4.2)
+ *  o TinyXML2 ()
+ *  o PNGDec (v1.1.6)
  *
  * HybridRadio.ino
  * Main Code File
@@ -23,12 +22,27 @@
  * v0.2 07/11/2022 - minor bug fixes
  * v0.3 15/11/2022 - minor bug fixes
  * v0.4 03/05/2023 - Updated for TFT_eSPI library
- *
+ * v2.0 27/02/2025 - Added Support for DAB Shield Pro
+ * v2.1 08/10/2025 - Updated for latest libraries
  */
 
-#define DFROBOT_DISPLAY
+/* Getting Started:
+*
+*  https://www.dabshield.com/projects/hybrid-radio-project
+ *
+*  Board Manager: esp32 by Espressife Systems (3.x)
+*  Board: WEMOS D1 R32
+*  Partition Scheme: No OTA (Large APP)
+ */
+
+//#define DFROBOT_DISPLAY   //(supplied 2022 - 23)
 //#define RESISTIVE_TOUCH
-//#define ROWLAND_DISPLAY
+//#define ROWLAND_DISPLAY   //(supplied to 2023-24)
+#define ROWLAND_IFS_DISPLAY //(supplied 2025 - )
+
+/*********  DAB SHIELD V3.0 **********/
+// Setup up Speaker output.
+#define SPEAKER_OUTPUT  SPEAKER_STEREO   //SPEAKER_NONE, SPEAKER_DIFF, SPEAKER_STEREO
 
 const char *ssid = "WIFI_SSID";
 const char *password = "WIFI_PASSWORD";
@@ -40,11 +54,11 @@ const char *password = "WIFI_PASSWORD";
 #include <TFT_eSPI.h>
 #include "ComfortaaBold9pt7b.h"
 
-#if defined ROWLAND_DISPLAY
+#if defined(ROWLAND_DISPLAY) || defined(ROWLAND_IFS_DISPLAY)
 #include <FT6236.h>
-#elif defined DFROBOT_DISPLAY
+#elif defined(DFROBOT_DISPLAY)
 #include "TAMC_GT911.h"
-#elif defined RESISTIVE_TOUCH
+#elif defined(RESISTIVE_TOUCH)
 #include <XPT2046_Touchscreen.h>
 #endif
 
@@ -128,11 +142,11 @@ PNG png;
 
 TFT_eSPI tft = TFT_eSPI();
 
-#if defined ROWLAND_DISPLAY
+#if defined(ROWLAND_DISPLAY) || defined(ROWLAND_IFS_DISPLAY)
 FT6236 ts = FT6236();
-#elif defined DFROBOT_DISPLAY
+#elif defined(DFROBOT_DISPLAY)
 TAMC_GT911 ts = TAMC_GT911(I2C_SDA, I2C_SCL, NULL, TS_RESET, 480, 320);
-#elif defined RESISTIVE_TOUCH
+#elif defined(RESISTIVE_TOUCH)
 XPT2046_Touchscreen ts(TS_CS);
 #endif
 
@@ -245,23 +259,27 @@ void setup() {
   SPI.begin();
 
   Dab.setCallback(ServiceData);
-  Dab.begin();
+  Dab.speaker(SPEAKER_OUTPUT);
+  Dab.begin(0);
 
   //FT6236 reset pin - drive high
   pinMode(TS_RESET,OUTPUT);
   digitalWrite(TS_RESET,HIGH);
 
-#if defined ROWLAND_DISPLAY
+#if defined(ROWLAND_DISPLAY) || defined(ROWLAND_IFS_DISPLAY)
   ts.begin(40, I2C_SDA, I2C_SCL);
-#elif defined DFROBOT_DISPLAY
+#elif defined(DFROBOT_DISPLAY)
   ts.begin();
   ts.setRotation(0);
-#elif defined RESISTIVE_TOUCH
+#elif defined(RESISTIVE_TOUCH)
   ts.begin();
   ts.setRotation(1); 
 #endif
 
   tft.init();
+#ifdef ROWLAND_IFS_DISPLAY  
+  tft.invertDisplay(true);
+#endif  
   tft.setSwapBytes(true);
   tft.setRotation(3);
 
@@ -684,7 +702,7 @@ void UIloop() {
 
   if(touch_timer == 0)
   {
-#if defined ROWLAND_DISPLAY
+#if defined(ROWLAND_DISPLAY) || defined (ROWLAND_IFS_DISPLAY)
     if(ts.touched())
     {
       // Retrieve a point
@@ -693,7 +711,7 @@ void UIloop() {
       point.y = p.x;
       point.z = p.z;
     }
-#elif defined DFROBOT_DISPLAY
+#elif defined(DFROBOT_DISPLAY)
     ts.read();
     if(ts.isTouched)
     {
@@ -701,7 +719,7 @@ void UIloop() {
       point.y = ts.points[0].y;
       point.z = 1;
     }
-#elif defined RESISTIVE_TOUCH
+#elif defined(RESISTIVE_TOUCH)
     if (ts.touched()) 
     {
       //Rough Calibration that'll do..
@@ -856,12 +874,13 @@ int32_t mySeek(PNGFILE *handle, int32_t position) {
 }
 
 // Function to draw pixels to the display
-void PNGDraw(PNGDRAW *pDraw) {
+int PNGDraw(PNGDRAW *pDraw) {
   uint16_t usPixels[128];
   
   png.getLineAsRGB565(pDraw, usPixels, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
   tft.pushImage(/*x=*/20, /*y=*/20 + pDraw->y, /*w=*/128, /*h=*/1, /*bitmap gImage_Bitmap=*/(uint16_t *)usPixels);
   sched_yield();
+  return 1;
 }
 
 void ButtonDown(uint8_t button) {

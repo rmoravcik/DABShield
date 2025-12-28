@@ -20,9 +20,16 @@
 // v1.5.1 19/03/2022 - Fix ServiceID for AVR (UNO) compiler
 // v1.5.2 18/10/2022 - Added EnsembleID and Extended Country Code 
 // v1.5.3 02/05/2023 - Added Pin Assignemnts via begin command
+// v2.0.0 27/02/2025 - Added Support for DAB Shield Pro
+// v2.0.2 20/03/2025 - Added Auto detect of DAB Shield Pro
+// v2.0.3 21/08/2025 - Added Local time offset / fix mono-stereo for Pro / clear pi/pty on tune (fm)
+// v2.0.5 03/09/2025 - Fix for I2C First Transmission may be NCK'd of Wire already open (seen in WeMos M0)
 ///////////////////////////////////////////////////////////
 #include "DABShield.h"
 #include "Si468xROM.h"
+#include "Wire.h"
+#include "nau8822.h"
+#include <time.h>
 
 #if defined(ESP32_DAB_PLUS)
 // #include "fw_dab_radio_4_0_5.h"
@@ -30,8 +37,8 @@
 #include "fw_dab_radio_6_0_6.h"
 #endif
 
-#define LIBMAJOR	1
-#define LIBMINOR	5
+#define LIBMAJOR	2
+#define LIBMINOR	0
 
 #define SI46XX_RD_REPLY 				0x00
 #define SI46XX_POWER_UP 				0x01
@@ -145,17 +152,30 @@ static bool DAB_service_valid(void);
 static void DAB_wait_service_list(void);
 static void WriteSpiMssg(unsigned char *data, uint32_t len);
 
+void NAU8822WriteReg(uint8_t reg, uint16_t data)
+{
+	byte i2cdata[2];
+	i2cdata[0] = ((reg << 1) & 0x7E);
+	i2cdata[0] |= (data & 0x100) ? 1 : 0;
+	i2cdata[1] = data & 0xFF;
+	Wire.beginTransmission(0x1A);
+	Wire.write(i2cdata, 2);
+	Wire.endTransmission();
+}
+
 DAB::DAB()
 {
 	LibMajor = LIBMAJOR;
 	LibMinor = LIBMINOR;
 	bitrate = 0;
 	samplerate = 0;
+	Pro = false;
+	speakeroutput = SPEAKER_NONE;
 }
 
 void DAB::task(void)
 {
-	if(digitalRead(interruptPin) == LOW)
+	//if(digitalRead(interruptPin) == LOW)
 	{
 		DataService();
 	}
@@ -221,7 +241,7 @@ void DAB::begin(uint8_t band)
 	pinMode(interruptPin, INPUT_PULLUP);
 
 	freq_index = -1;
-	
+
 	si468x_reset();
 	if(band == 0)
 	{
@@ -245,7 +265,68 @@ void DAB::begin(uint8_t band)
 	si468x_set_property(0x0800, 0x8003); // Digital Output Enable
 #endif
 
+	//Detect the "Pro" (DABShield v3.0)
+	Wire.begin();
+	Wire.beginTransmission(0x1A);
+	int rc = Wire.endTransmission();
+	//Retry if Wire is already open then first try may fail (seen on SAMD M0)
+	if(rc) 
+	{
+		Wire.beginTransmission(0x1A);
+		rc = Wire.endTransmission();
+	}
+
+	if (rc == 0)
+	{
+		Pro = true;
+	}
+
+	if (Pro)
+	{
+		//Set up Digital Audio Slave
+		si468x_set_property(0x0200, 0x0000); // I2S slave mode
+		si468x_set_property(0x0201, 48000);  // I2S sample rate
+		si468x_set_property(0x0800, 0x0002); // Digital Output Enable
+
+		//Initialise the Codec
+		//Master Mode...
+		NAU8822WriteReg(NAU8822_REG_CLOCKING, 0x009);
+		//Power  
+		NAU8822WriteReg(NAU8822_REG_POWER_MANAGEMENT_1, 0x00D);
+		//Audio Output
+		NAU8822WriteReg(NAU8822_REG_POWER_MANAGEMENT_2, 0x180);
+		//DAC
+		NAU8822WriteReg(NAU8822_REG_POWER_MANAGEMENT_3, 0x00F);
+		//Speaker Output
+		speaker(speakeroutput);
+	}
 	error = command_error;
+}
+
+void DAB::speaker(DABSpeaker value)
+{
+	//Speaker Output...
+	speakeroutput = value;
+	if (Pro)
+	{
+		switch (value)
+		{
+		case SPEAKER_NONE: //Disable
+			NAU8822WriteReg(NAU8822_REG_POWER_MANAGEMENT_3, 0x00F);
+			NAU8822WriteReg(NAU8822_REG_RIGHT_SPEAKER_CONTROL, 0x000);
+			break;
+
+		case SPEAKER_DIFF: //Differential
+			NAU8822WriteReg(NAU8822_REG_POWER_MANAGEMENT_3, 0x06F);
+			NAU8822WriteReg(NAU8822_REG_RIGHT_SPEAKER_CONTROL, 0x010);
+			break;
+
+		case SPEAKER_STEREO: //Stereo
+			NAU8822WriteReg(NAU8822_REG_POWER_MANAGEMENT_3, 0x06F);
+			NAU8822WriteReg(NAU8822_REG_RIGHT_SPEAKER_CONTROL, 0x000);
+			break;
+		}
+	}
 }
 
 void DAB::tune(uint8_t freq)
@@ -302,7 +383,8 @@ void DAB::tune(uint16_t freq_kHz)
 {
 	si468x_fm_tune_freq(freq_kHz);
 	si468x_fm_rsq_status();
-
+	pi = 0;
+ 	pty = 0;	
 	uint8_t i;
 	for(i=0; i<9; i++) {ps[i] = 0;}
 	for(i=0; i<DAB_MAX_SERVICEDATA_LEN; i++) {ServiceData[i] = 0;}
@@ -313,6 +395,8 @@ bool DAB::seek(uint8_t dir, uint8_t wrap)
 {
 	si468x_fm_seek(dir, wrap);
 	si468x_fm_rsq_status();
+	pi = 0;
+ 	pty = 0;	
 	uint8_t i;
 	for(i=0; i<9; i++) {ps[i] = 0;}
 	for(i=0; i<DAB_MAX_SERVICEDATA_LEN; i++) {ServiceData[i] = 0;}
@@ -365,8 +449,42 @@ bool DAB::servicevalid(void)
 
 void DAB::vol(uint8_t vol)
 {
-	si468x_set_property(0x0300, (vol & 0x3F));
+	if (Pro)
+	{
+		NAU8822WriteReg(NAU8822_REG_LHP_VOLUME, 0x000 | (vol & 0x3F));
+		NAU8822WriteReg(NAU8822_REG_RHP_VOLUME, 0x100 | (vol & 0x3F));
+		NAU8822WriteReg(NAU8822_REG_LSPKOUT_VOLUME, 0x000 | (vol & 0x3F));
+		NAU8822WriteReg(NAU8822_REG_RSPKOUT_VOLUME, 0x100 | (vol & 0x3F));
+	}
+	else
+	{
+		si468x_set_property(0x0300, (vol & 0x3F));
+	}
 	error = command_error;
+}
+
+void DAB::bass(int8_t level)
+{
+	if (Pro)
+	{
+		NAU8822WriteReg(NAU8822_REG_EQ1, 0x120 | ((12 - level) & 0x1F));
+	}
+}
+
+void DAB::mid(int8_t level)
+{
+	if (Pro)
+	{
+		NAU8822WriteReg(NAU8822_REG_EQ3, 0x120 | ((12 - level) & 0x1F));
+	}
+}
+
+void DAB::treble(int8_t level)
+{
+	if (Pro)
+	{
+		NAU8822WriteReg(NAU8822_REG_EQ5, 0x000 | ((12 - level) & 0x1F));
+	}
 }
 
 uint32_t DAB::freq_khz(uint8_t index)
@@ -702,7 +820,21 @@ bool DAB::time(DABTime *time)
 
 void DAB::mono(bool enable)
 {
-	si468x_set_property(0x0302, enable ? 0x01 : 0x00);
+	if (Pro)
+	{
+		if(enable)
+		{
+			NAU8822WriteReg(NAU8822_REG_OUTPUT_CONTROL, 0x062);
+		}
+		else
+		{
+			NAU8822WriteReg(NAU8822_REG_OUTPUT_CONTROL, 0x002);
+		}
+	}
+	else
+	{
+		si468x_set_property(0x0302, enable ? 0x01 : 0x00);
+	}
 }
 
 void DAB::mute(bool left, bool right)
@@ -1745,7 +1877,26 @@ uint16_t DAB::decode_rds_group(uint16_t blockA, uint16_t blockB, uint16_t blockC
 		Hours = ((blockD >> 12) & 0x0f);
 		Hours += ((blockC << 4) & 0x0010);
 		Minutes = ((blockD >> 6) & 0x3f);
-		//LocalOffset = (blockD & 0x3f);
+
+		int LocalOffset_minutes = (blockD & 0x1f) * 30;
+		LocalOffset_minutes *= (blockD & 0x20) ? -1 : 1;
+
+		//let <time.h> do the math
+		struct tm timeinfo = { 0 };
+		timeinfo.tm_year = Year - 1900;
+		timeinfo.tm_mon = Months;
+		timeinfo.tm_mday = Days;
+		timeinfo.tm_hour = Hours;
+		timeinfo.tm_min = Minutes + LocalOffset_minutes;
+		// Normalize the time structure
+		mktime(&timeinfo);
+
+		Year = timeinfo.tm_year + 1900;
+		Months = timeinfo.tm_mon;
+		Days = timeinfo.tm_mday;
+		Hours = timeinfo.tm_hour;
+		Minutes = timeinfo.tm_min;
+
 		ret |= 0x0010;
 	break;
 	}
