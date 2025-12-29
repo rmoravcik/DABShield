@@ -102,12 +102,12 @@ unsigned char spiBuf[SPI_BUFF_SIZE + 8];
 uint8_t command_error;
 
 #if defined(ESP32_DAB_PLUS)
-uint8_t *pSlideShowTemp = NULL;
-uint32_t slideShowSizeTemp = 0;
-uint8_t *pSlideShow = NULL;
-uint32_t slideShowSize = 0;
+uint8_t *slideShowBuffer[2] = { NULL, NULL };
+uint32_t slideShowSize[2] = { 0, 0 };
+uint8_t slideShowIndex = 0;
+uint8_t lastSlideShowIndex = 0;
 uint32_t slideShowByteCounter = 0;
-bool slideShowValid = false;
+bool slideShowValid[2] = { false, false };
 bool rdsTextValid = false;
 #endif
 
@@ -263,6 +263,20 @@ void DAB::begin(uint8_t band)
 	si468x_set_property(0x0201, 44100);  // I2S sample rate
 	si468x_set_property(0x0202, 0x1000); // I2S output format
 	si468x_set_property(0x0800, 0x8003); // Digital Output Enable
+
+	for (uint8_t i = 0; i < 2; i++)
+	{
+		slideShowBuffer[i] = (uint8_t *) ps_malloc(50 * 1024);
+		if (slideShowBuffer[i] == NULL)
+		{
+			Serial.println("ERROR: Failed to allocate buffer!");
+		}
+
+		slideShowSize[i]   = 0;
+		slideShowValid[i]  = false;
+	}
+	slideShowIndex = 0;
+	lastSlideShowIndex = 0;
 #endif
 
 	//Detect the "Pro" (DABShield v3.0)
@@ -1577,52 +1591,29 @@ void DAB::parse_service_data(void)
 		if ((spiBuf[27] == 0x80) && (spiBuf[28] == 0x00) && (spiBuf[29] == 0x12) && (byte_count < 65))
 		{
 			// init transfer
-			if (pSlideShowTemp)
-			{
-				free(pSlideShowTemp);
-				pSlideShowTemp = NULL;
-				slideShowSizeTemp = 0;
-			}
-
-			slideShowSizeTemp = (((uint16_t)spiBuf[35] << 12) | ((uint16_t)spiBuf[36] << 4) | ((uint16_t)spiBuf[37]  >> 4)) & 0x00FFFF;
-			pSlideShowTemp = (uint8_t *) ps_malloc(slideShowSizeTemp);
+			slideShowValid[slideShowIndex] = false;
+			slideShowSize[slideShowIndex] = (((uint16_t)spiBuf[35] << 12) | ((uint16_t)spiBuf[36] << 4) | ((uint16_t)spiBuf[37]  >> 4)) & 0x00FFFF;
 			slideShowByteCounter = 0;
 		}
-		else if (((spiBuf[27] == 0x00) || (spiBuf[27] == 0x80)) && (spiBuf[29] == 0x12) && slideShowSizeTemp)
+		else if (((spiBuf[27] == 0x00) || (spiBuf[27] == 0x80)) && (spiBuf[29] == 0x12) && slideShowSize[slideShowIndex])
 		{
-			if (pSlideShowTemp)
-			{
-				memcpy(pSlideShowTemp + slideShowByteCounter, &spiBuf[34], byte_count - 11);
-				slideShowByteCounter += byte_count - 11;
-			}
+			memcpy(slideShowBuffer[slideShowIndex] + slideShowByteCounter, &spiBuf[34], byte_count - 11);
+			slideShowByteCounter += byte_count - 11;
 
 			// transfer finished
 			if (spiBuf[27] == 0x80)
 			{
-				if (slideShowByteCounter == slideShowSizeTemp)
+				if (slideShowByteCounter == slideShowSize[slideShowIndex])
 				{
-					if (pSlideShow)
-					{
-						free(pSlideShow);
-					}
-
 					Serial.print("SlideShow successuly received. File size ");
 					Serial.println(slideShowByteCounter);
 
-					pSlideShow = pSlideShowTemp;
-					slideShowSize = slideShowSizeTemp;
-					slideShowValid = true;
-				}
-				else
-				{
-					if (pSlideShowTemp)
-					{
-						free(pSlideShowTemp);
-					}
+					slideShowValid[slideShowIndex] = true;
+					lastSlideShowIndex = slideShowIndex;
+					slideShowIndex = (slideShowIndex + 1) % 2;
 				}
 
-				pSlideShowTemp = NULL;
-				slideShowSizeTemp = 0;
+				slideShowSize[slideShowIndex] = 0;
 			}
 		}
 	}
@@ -1649,9 +1640,9 @@ bool DAB::rdstextvalid(void)
 
 bool DAB::slideshowvalid(void)
 {
-	if (slideShowValid)
+	if (slideShowValid[lastSlideShowIndex])
 	{
-		slideShowValid = false;
+		slideShowValid[lastSlideShowIndex] = false;
 		return true;
 	}
 
@@ -1660,8 +1651,8 @@ bool DAB::slideshowvalid(void)
 
 uint8_t* DAB::slideshow(uint32_t *size)
 {
-	*size = slideShowSize;
-	return pSlideShow;
+	*size = slideShowSize[lastSlideShowIndex];
+	return slideShowBuffer[lastSlideShowIndex];
 }
 #endif
 
