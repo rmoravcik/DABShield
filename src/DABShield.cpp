@@ -1605,8 +1605,8 @@ void DAB::parse_service_data(void)
 			{
 				if (slideShowByteCounter == slideShowSize[slideShowIndex])
 				{
-					Serial.print("SlideShow successuly received. File size ");
-					Serial.println(slideShowByteCounter);
+//					Serial.print("SlideShow successuly received. File size ");
+//					Serial.println(slideShowByteCounter);
 
 					slideShowValid[slideShowIndex] = true;
 					lastSlideShowIndex = slideShowIndex;
